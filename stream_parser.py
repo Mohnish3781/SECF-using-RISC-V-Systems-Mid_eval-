@@ -1,15 +1,15 @@
+#!/usr/bin/env python3
 import os
 import sys
 import struct
-import binascii  # Used to compute local integrity check tags
+import binascii
 
 PIPE_PATH = "/tmp/nodeA_to_attacker"
 
-
-HEADER_FORMAT = '<IBxH'
+HEADER_FORMAT = '<IBBBxH'
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)  
 
-REMAINDER_SIZE = 260
+REMAINDER_SIZE = 262
 
 
 def execute_two_phase_parser():
@@ -27,7 +27,7 @@ def execute_two_phase_parser():
 
     try:
         while True:
-            # PHASE 1: READ AND UNPACK FIXED HEADER
+            raw_header = os.read(fd, HEADER_SIZE)
             
             if not raw_header:
                 print("[*] Stream terminated by transmitter node. Awaiting reconnect...")
@@ -35,36 +35,43 @@ def execute_two_phase_parser():
                 fd = os.open(PIPE_PATH, os.O_RDONLY)
                 continue
 
-            magic, packet_type, payload_len = struct.unpack(HEADER_FORMAT, raw_header)
+            if len(raw_header) < HEADER_SIZE:
+                print("[-] Warning: Received partial header chunk. Dropping out-of-sync bytes.")
+                continue
+
+            magic, src_id, dest_id, packet_type, payload_len = struct.unpack(HEADER_FORMAT, raw_header)
             
-            print("┌" + "─"*50)
+            print("┌" + "─"*60)
             print(f"│ [PHASE 1 SUCCESS] Extracted Header Block Telemetry")
-            print(f"│  ├── Magic Signature : {hex(magic).upper()}")
-            print(f"│  ├── Packet Type Tag : {packet_type}")
-            print(f"│  └── Dynamic Payload : {payload_len} bytes calculated")
-            print("├" + "─"*50)
+            print(f"│  ├── Magic Signature   : {hex(magic).upper()}")
+            print(f"│  ├── Source Node ID    : {src_id}")
+            print(f"│  ├── Destination ID    : {dest_id}")
+            print(f"│  ├── Packet Type Tag   : {packet_type}")
+            print(f"│  └── Dynamic Payload   : {payload_len} bytes calculated")
+            print("├" + "─"*60)
 
-            # PHASE 2: CALCULATED SEQUENTIAL READ (Fixed 260-Byte Structure Remainder)
-
-
-            raw_phase2_block = os.open(fd, REMAINDER_SIZE) if 'os.read' else os.read(fd, REMAINDER_SIZE)
+            raw_phase2_block = os.read(fd, REMAINDER_SIZE)
+            
+            if len(raw_phase2_block) < REMAINDER_SIZE:
+                print("[-] Warning: Remainder stream truncation detected. Dropping frame.")
+                print("└" + "─"*60 + "\n")
+                continue
             
             raw_payload_array = raw_phase2_block[:256]
-            
             raw_payload_body = raw_payload_array[:payload_len]
             
-            # Unpack the final 4-byte sequence number sitting at the end of the structure block
-            sequence_counter = struct.unpack('<I', raw_phase2_block[256:260])[0]
+            packet_checksum, sequence_counter = struct.unpack('<HI', raw_phase2_block[256:262])
             
-            crc_checksum = binascii.crc32(raw_payload_body)
-            
+            local_arithmetic_checksum = sum(raw_payload_body) & 0xFFFF
+            local_crc32 = binascii.crc32(raw_payload_body)
             decoded_message = raw_payload_body.decode('utf-8', errors='ignore')
 
             print(f"│ [PHASE 2 SUCCESS] Extracted Remainder Data Blocks")
-            print(f"│  ├── String Body     : \"{decoded_message}\"")
-            print(f"│  ├── Integrity Code  : {hex(crc_checksum).upper()}")
-            print(f"│  └── Sequence Index  : {sequence_counter}")
-            print("└" + "─"*50 + "\n")
+            print(f"│  ├── String Body       : \"{decoded_message}\"")
+            print(f"│  ├── Stream Checksum   : {packet_checksum} (Local Calc: {local_arithmetic_checksum})")
+            print(f"│  ├── Local CRC32 Tag   : {hex(local_crc32).upper()}")
+            print(f"│  └── Sequence Index    : {sequence_counter}")
+            print("└" + "─"*60 + "\n")
 
     except KeyboardInterrupt:
         print("\n[*] Parsing engine closed manually by engineer interrupt.")
