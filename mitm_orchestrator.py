@@ -7,16 +7,11 @@ import binascii
 import time
 import argparse
 
-# Named pipe paths matching your simulation topography
 PIPE_IN = "/tmp/nodeA_to_attacker"
 PIPE_OUT = "/tmp/attacker_to_nodeB"
 
-# --- UPDATED PROTOCOL STRUCT SPECIFICATION (Matches new packet.h Contract) ---
-# Layout: Little-Endian (<)
-# Header (4B 'I') | srcID (1B 'B') | destID (1B 'B') | Type (1B 'B') | Pad (1B 'x')
-# Length (2B 'H') | Payload (256B '256s') | Checksum (2B 'H') | Seq (4B 'I')
 PACKET_FORMAT = '<IBBBxH256sHI'
-PACKET_SIZE = struct.calcsize(PACKET_FORMAT)  # Evaluates exactly to 272 bytes
+PACKET_SIZE = struct.calcsize(PACKET_FORMAT) 
 
 
 class MitmOrchestrator:
@@ -25,7 +20,7 @@ class MitmOrchestrator:
         self.target_str = target_str
         self.replace_str = replace_str
         self.inject_msg = inject_msg
-        self.replay_cache = []  # In-memory storage for capturing valid frames
+        self.replay_cache = [] 
 
     def compute_crc32(self, data_bytes):
         """Computes unsigned 32-bit CRC checksum for logging telemetry."""
@@ -46,7 +41,6 @@ class MitmOrchestrator:
 
         print(f"[*] Initializing Active Intercept Layer. Strategy: [{self.mode.upper()}]")
         
-        # Verify pipe node readiness
         if not os.path.exists(PIPE_IN) or not os.path.exists(PIPE_OUT):
             print("[-] Infrastructure Error: Named pipes missing.")
             sys.exit(1)
@@ -61,10 +55,6 @@ class MitmOrchestrator:
 
         while True:
             try:
-                # -------------------------------------------------------------
-                # FIXED STRUCTURE EXTRACTION (Matches sizeof(Packet) = 272B)
-                # -------------------------------------------------------------
-                # FIXED CRITICAL BUG: Removed broken ternary logic that forced os.open
                 raw_packet = os.read(fd_in, PACKET_SIZE)
                 if not raw_packet:
                     print("[*] Stream terminated by Sender. Awaiting reconnection context...")
@@ -76,16 +66,11 @@ class MitmOrchestrator:
                     print(f"[-] Received incomplete frame ({len(raw_packet)}/{PACKET_SIZE} bytes). Skipping...")
                     continue
 
-                # Unpack matching native C struct alignment layouts (8 targeted elements)
                 magic, src_id, dest_id, packet_type, payload_len, raw_payload, packet_checksum, seq = struct.unpack(PACKET_FORMAT, raw_packet)
 
-                # Isolate active cleartext data up to the validated string boundary
                 cleartext_payload = raw_payload[:payload_len].decode('utf-8', errors='ignore')
                 crc = self.compute_crc32(raw_payload[:payload_len])
 
-                # -------------------------------------------------------------
-                # ATTACK CLASS 1: PLAINTEXT SNIFFING LOGGING
-                # -------------------------------------------------------------
                 print("\033[94m" + "="*60)
                 print(f"[INTERCEPTED FRAME] Sequence Index: {seq}")
                 print(f"  ├── Magic Identifier : {hex(magic).upper()}")
@@ -97,44 +82,30 @@ class MitmOrchestrator:
                 print(f"  └── Telemetry CRC32  : {hex(crc).upper()}")
                 print("="*60 + "\033[0m")
 
-                # -------------------------------------------------------------
-                # ATTACK CLASS 2: REPLAY CACHING MECHANISM
-                # -------------------------------------------------------------
                 if self.mode == "replay":
                     self.replay_cache.append(raw_packet)
                     print(f"[+] Replay Subsystem: Cached valid 272-byte structural frame.")
 
-                # -------------------------------------------------------------
-                # ATTACK CLASS 3: PACKET TAMPERING MOTOR
-                # -------------------------------------------------------------
                 if self.mode == "tamper" and self.target_str and self.replace_str:
                     if self.target_str in cleartext_payload:
                         print(f"\n\033[91m[!] CRITICAL: Found match for target query token: '{self.target_str}'")
                         
-                        # Execute string replacement transformation
                         cleartext_payload = cleartext_payload.replace(self.target_str, self.replace_str)
                         new_payload_bytes = cleartext_payload.encode('utf-8', errors='ignore')
                         payload_len = len(new_payload_bytes)
                         
-                        # Pad the byte array with nulls back to exactly 256 bytes for C struct compliance
                         padded_payload = new_payload_bytes.ljust(256, b'\x00')
                         
-                        # CRITICAL FIX: Recalculate structural arithmetic checksum for edited payloads
                         packet_checksum = self.compute_arithmetic_checksum(padded_payload, payload_len)
                         
-                        # Pack back into complete 272-byte struct format
                         raw_packet = struct.pack(PACKET_FORMAT, magic, src_id, dest_id, packet_type, payload_len, padded_payload, packet_checksum, seq)
                         
                         print(f"  ├── Mutator: Swapped cleartext with string: \"{cleartext_payload}\"")
                         print(f"  ├── Checksum Re-gen: Generated new hash constraint value: {packet_checksum}")
                         print(f"  └── Structure Pack: Synthesized updated 272-byte frame stream.\033[0m\n")
 
-                # Emit final compliant packet structure down the channel to Node B
                 os.write(fd_out, raw_packet)
 
-                # -------------------------------------------------------------
-                # ATTACK CLASS 2: REPLAY TIME-DELAY INJECTION RUNNER
-                # -------------------------------------------------------------
                 if self.mode == "replay" and len(self.replay_cache) > 0:
                     time.sleep(2)  # Delay injection footprint by two seconds
                     print("\n\033[33m[!] REPLAY ATTACK EXECUTION: Re-injecting historical state frame...")
@@ -157,7 +128,7 @@ class MitmOrchestrator:
         try:
             fd_out = os.open(PIPE_OUT, os.O_WRONLY)
             
-            fake_magic = 0xABCD1234  # MAGIC_HEADER macro definition inside packet.h
+            fake_magic = 0xABCD1234 
             fake_src = 1
             fake_dest = 2
             fake_type = 1          
@@ -166,13 +137,10 @@ class MitmOrchestrator:
             new_payload_bytes = self.inject_msg.encode('utf-8', errors='ignore')
             payload_len = len(new_payload_bytes)
             
-            # Pad the payload string to the fixed 256-byte constraint
             padded_payload = new_payload_bytes.ljust(256, b'\x00')
             
-            # CRITICAL FIX: Dynamically generate arithmetic checksum verification field for injection
             fake_checksum = self.compute_arithmetic_checksum(padded_payload, payload_len)
             
-            # Construct a clean binary equivalent of sizeof(Packet) (272 bytes)
             packet = struct.pack(PACKET_FORMAT, fake_magic, fake_src, fake_dest, fake_type, payload_len, padded_payload, fake_checksum, fake_seq)
             
             print("\n\033[95m" + "!"*60)
