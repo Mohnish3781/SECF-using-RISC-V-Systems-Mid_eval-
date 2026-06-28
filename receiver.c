@@ -1,4 +1,4 @@
-include <stdio.h>
+#include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -8,7 +8,7 @@ int main() {
 
     Packet pkt;
 
-    int fd = open("comm_pipe", O_RDONLY);
+    int fd = open("/tmp/attacker_to_nodeB", O_RDONLY);
 
     read(fd, &pkt, sizeof(Packet));
 
