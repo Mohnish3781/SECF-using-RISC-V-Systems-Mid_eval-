@@ -17,7 +17,7 @@ int main() {
     strcpy((char*)pkt.payload, "HELLO FROM NODE A");
     pkt.length = strlen((char*)pkt.payload);
 
-    int fd = open("comm_pipe", O_WRONLY);
+    int fd = open("/tmp/nodeA_to_attacker", O_WRONLY);
     pkt.checksum = 0;
 
     for(int i = 0; i < pkt.length; i++)
