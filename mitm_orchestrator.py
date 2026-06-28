@@ -11,7 +11,7 @@ PIPE_IN = "/tmp/nodeA_to_attacker"
 PIPE_OUT = "/tmp/attacker_to_nodeB"
 
 PACKET_FORMAT = '<IBBBxH256sHI'
-PACKET_SIZE = struct.calcsize(PACKET_FORMAT) 
+PACKET_SIZE = struct.calcsize(PACKET_FORMAT)  # Evaluates to exactly 272 bytes
 
 
 class MitmOrchestrator:
@@ -32,6 +32,16 @@ class MitmOrchestrator:
         for i in range(min(length, len(payload_bytes))):
             checksum += payload_bytes[i]
         return checksum & 0xFFFF
+
+    def read_exact(self, fd, n):
+        """Ensures exact extraction of byte structures over streaming named pipes."""
+        buffer = b''
+        while len(buffer) < n:
+            chunk = os.read(fd, n - len(buffer))
+            if not chunk:
+                return buffer  # End of stream handled by caller
+            buffer += chunk
+        return buffer
 
     def run(self):
         """Launches the primary pipeline processing engine."""
@@ -55,15 +65,12 @@ class MitmOrchestrator:
 
         while True:
             try:
-                raw_packet = os.read(fd_in, PACKET_SIZE)
-                if not raw_packet:
+                raw_packet = self.read_exact(fd_in, PACKET_SIZE)
+                
+                if not raw_packet or len(raw_packet) < PACKET_SIZE:
                     print("[*] Stream terminated by Sender. Awaiting reconnection context...")
                     os.close(fd_in)
                     fd_in = os.open(PIPE_IN, os.O_RDONLY)
-                    continue
-
-                if len(raw_packet) < PACKET_SIZE:
-                    print(f"[-] Received incomplete frame ({len(raw_packet)}/{PACKET_SIZE} bytes). Skipping...")
                     continue
 
                 magic, src_id, dest_id, packet_type, payload_len, raw_payload, packet_checksum, seq = struct.unpack(PACKET_FORMAT, raw_packet)
@@ -92,10 +99,11 @@ class MitmOrchestrator:
                         
                         cleartext_payload = cleartext_payload.replace(self.target_str, self.replace_str)
                         new_payload_bytes = cleartext_payload.encode('utf-8', errors='ignore')
-                        payload_len = len(new_payload_bytes)
                         
-                        padded_payload = new_payload_bytes.ljust(256, b'\x00')
+                        payload_len = min(len(new_payload_bytes), 256)
+                        padded_payload = new_payload_bytes[:256].ljust(256, b'\x00')
                         
+                        # Recalculate structural math checksums dynamically
                         packet_checksum = self.compute_arithmetic_checksum(padded_payload, payload_len)
                         
                         raw_packet = struct.pack(PACKET_FORMAT, magic, src_id, dest_id, packet_type, payload_len, padded_payload, packet_checksum, seq)
@@ -107,7 +115,7 @@ class MitmOrchestrator:
                 os.write(fd_out, raw_packet)
 
                 if self.mode == "replay" and len(self.replay_cache) > 0:
-                    time.sleep(2)  # Delay injection footprint by two seconds
+                    time.sleep(2)  # Delay injection footprints by two seconds
                     print("\n\033[33m[!] REPLAY ATTACK EXECUTION: Re-injecting historical state frame...")
                     os.write(fd_out, self.replay_cache[0])
                     print("    └── [SUCCESS] Duplicate sequence packet pushed to Node B.\033[0m\n")
@@ -135,9 +143,8 @@ class MitmOrchestrator:
             fake_seq = 1337         
             
             new_payload_bytes = self.inject_msg.encode('utf-8', errors='ignore')
-            payload_len = len(new_payload_bytes)
-            
-            padded_payload = new_payload_bytes.ljust(256, b'\x00')
+            payload_len = min(len(new_payload_bytes), 256)
+            padded_payload = new_payload_bytes[:256].ljust(256, b'\x00')
             
             fake_checksum = self.compute_arithmetic_checksum(padded_payload, payload_len)
             
