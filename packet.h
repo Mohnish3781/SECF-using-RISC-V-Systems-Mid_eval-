@@ -7,11 +7,22 @@
 #define MAX_PAYLOAD 256
 
 typedef struct {
+
     uint32_t header;
+
+    uint8_t srcID;
+    uint8_t destID;
+
     uint8_t type;
+
     uint16_t length;
+
     uint8_t payload[MAX_PAYLOAD];
+
+    uint16_t checksum;
+
     uint32_t seq;
+
 } Packet;
 
 #endif
